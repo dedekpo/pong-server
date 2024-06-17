@@ -13,6 +13,7 @@ export default config({
      * Define your room handlers:
      */
     gameServer.define("pong_room", MyRoom);
+    gameServer.simulateLatency(200);
   },
 
   initializeExpress: (app) => {
