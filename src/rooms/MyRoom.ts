@@ -1,20 +1,37 @@
 import { Room, Client } from "@colyseus/core";
 import { MyRoomState } from "./schema/MyRoomState";
+import * as RAPIER from "@dimforge/rapier3d-compat";
+import { initPhysics } from "../physics/physics";
+import {
+  ballHitOpponentTable,
+  ballHitPlayerTable,
+  handleBallOut,
+  racketHitBall,
+} from "../physics/events";
+import { BROADCAST_STEP, PHYSICS_STEP } from "../config";
 
 type PlayerType = {
   id: string;
   isHost: boolean;
-  isHandlingBall: boolean;
   score: number;
-  position: {
+  mousePosition: {
     x: number;
     y: number;
   };
   playerName?: string;
   playerColor?: string;
+  racketRigidBody?: RAPIER.RigidBody;
 };
 
 export class MyRoom extends Room<MyRoomState> {
+  world: RAPIER.World;
+  ballRigidBody: RAPIER.RigidBody;
+  racketRigidBody: RAPIER.RigidBody;
+  opponentRacketRigidBody: RAPIER.RigidBody;
+  playerTableBody: RAPIER.RigidBody;
+  opponentTableBody: RAPIER.RigidBody;
+  ballOutSensor: RAPIER.Collider;
+
   maxClients = 2;
 
   playersMap = new Map<string, PlayerType>();
@@ -25,88 +42,169 @@ export class MyRoom extends Room<MyRoomState> {
   hostId: string;
   opponentId: string;
 
-  playerHandlingBall: string;
   playerLastTableHit: string;
+  touchedLastBy: string;
 
   onCreate(options: any) {
     if (options.private) {
       this.setPrivate(true);
       this.roomId = generateRandomString();
     }
-    this.setState(new MyRoomState());
 
-    // Fixed rate update loop
-    this.setSimulationInterval(
-      () =>
-        this.broadcast("update", { players: this.playersMap, ball: this.ball }),
-      1000 / 30 // 30fps
-    );
-
-    this.onMessage("update", (client, { positionX, positionY }) => {
+    this.onMessage("update", (client, { x, y }) => {
       const player = this.playersMap.get(client.sessionId);
       if (!player) return;
-      player.position = {
-        x: positionX,
-        y: positionY,
+      player.mousePosition = {
+        x,
+        y,
       };
     });
+  }
 
-    this.onMessage("update-ball", (client, { ballTranslation, ballLinvel }) => {
-      const isHost = client.sessionId === this.hostId;
+  foundMatch() {
+    RAPIER.init().then(() => {
+      const {
+        world,
+        ball,
+        racket,
+        opponentRacket,
+        opponentTable,
+        playerTable,
+        ballOutSensor,
+      } = initPhysics();
+      this.world = world;
+      this.ballRigidBody = ball;
+      this.racketRigidBody = racket;
+      this.opponentRacketRigidBody = opponentRacket;
+      this.playerTableBody = playerTable;
+      this.opponentTableBody = opponentTable;
+      this.ballOutSensor = ballOutSensor;
 
-      if (isHost) {
-        this.ball.ballTranslation = ballTranslation;
-        this.ball.ballLinvel = ballLinvel;
-      } else {
-        this.ball.ballTranslation = {
-          x: ballTranslation.x,
-          y: ballTranslation.y,
-          z: ballTranslation.z * -1,
-        };
-        this.ball.ballLinvel = {
-          x: ballLinvel.x,
-          y: ballLinvel.y,
-          z: ballLinvel.z * -1,
-        };
-      }
-    });
-
-    this.onMessage("balls-out", (_) => {
-      const currentPlayerHandlingBall = this.playerHandlingBall;
-
-      this.playersMap.forEach((player) => {
-        if (player.id !== currentPlayerHandlingBall) {
-          this.handleScore(player.id);
-        }
-      });
-    });
-
-    this.onMessage("hit-ball", (client) => {
-      this.playersMap.forEach((player) => {
-        if (player.id !== client.sessionId) {
-          player.isHandlingBall = true;
-          this.playerHandlingBall = player.id;
+      for (const player of this.playersMap.values()) {
+        if (player.isHost) {
+          player.racketRigidBody = this.racketRigidBody;
         } else {
-          player.isHandlingBall = false;
+          player.racketRigidBody = this.opponentRacketRigidBody;
         }
-      });
-    });
-
-    this.onMessage("hit-my-table", (client) => {
-      if (client.sessionId !== this.playerHandlingBall) return;
-      const opponentPlayer =
-        client.sessionId === this.hostId ? this.opponentId : this.hostId;
-
-      if (this.playerLastTableHit === client.sessionId) {
-        this.handleScore(opponentPlayer);
-        return;
       }
-      this.playerLastTableHit = client.sessionId;
+
+      this.setSimulationInterval(
+        (deltaTime) => this.update(deltaTime),
+        PHYSICS_STEP
+      );
+
+      this.clock.setInterval(() => {
+        this.broadcastPositions();
+      }, BROADCAST_STEP);
+    });
+  }
+
+  update(deltaTime: number) {
+    // Event queue for detecting collisions
+    let eventQueue = new RAPIER.EventQueue(true);
+    // Step the physics world
+    this.world.step(eventQueue);
+
+    for (const player of this.playersMap.values()) {
+      // // Determine the interpolation speed factor
+      const lerpFactor = 0.1; // Adjust this value to change the smoothness
+      const currentPosition = player.racketRigidBody?.translation();
+      const targetPosition = player.mousePosition;
+
+      // // Calculate the interpolated position
+      const interpolatedPosition = {
+        x:
+          currentPosition.x +
+          lerpFactor * (targetPosition.x - currentPosition.x),
+        y:
+          currentPosition.y +
+          lerpFactor * (targetPosition.y - currentPosition.y),
+        z: currentPosition.z,
+      };
+
+      // // Set the new interpolated position
+      if (player.isHost) {
+        player.racketRigidBody.setTranslation(
+          {
+            x: 0,
+            y: 5,
+            z: 30,
+          },
+          true
+        );
+      } else {
+        player.racketRigidBody.setTranslation(interpolatedPosition, true);
+      }
+    }
+
+    eventQueue.drainCollisionEvents((handle1, handle2, started) => {
+      if (
+        handle1 === this.ballRigidBody.handle &&
+        handle2 === this.ballOutSensor.handle &&
+        started
+      ) {
+        handleBallOut(this);
+      }
     });
 
-    this.onMessage("hit-opponent-table", (client) => {
-      if (client.sessionId !== this.playerHandlingBall) return;
-      this.handleScore(client.sessionId);
+    eventQueue.drainContactForceEvents((event) => {
+      let handle1 = event.collider1(); // Handle of the first collider involved in the event.
+      let handle2 = event.collider2(); // Handle of the second collider involved in the event.
+      /* Handle the contact force event. */
+
+      if (
+        handle1 === this.ballRigidBody.handle &&
+        handle2 === this.racketRigidBody.handle
+      ) {
+        racketHitBall(this.ballRigidBody, this.racketRigidBody);
+        this.touchedLastBy = this.hostId;
+      }
+      if (
+        handle1 === this.ballRigidBody.handle &&
+        handle2 === this.opponentRacketRigidBody.handle
+      ) {
+        racketHitBall(this.ballRigidBody, this.opponentRacketRigidBody);
+        this.touchedLastBy = this.opponentId;
+      }
+      if (
+        handle1 === this.playerTableBody.handle &&
+        handle2 === this.ballRigidBody.handle
+      ) {
+        ballHitPlayerTable(this);
+      }
+      if (
+        handle1 === this.opponentTableBody.handle &&
+        handle2 === this.ballRigidBody.handle
+      ) {
+        ballHitOpponentTable(this);
+      }
+    });
+
+    // this.broadcastPositions();
+  }
+
+  broadcastPositions() {
+    // Get the positions of the ball and rackets
+    const ballPosition = this.ballRigidBody.translation();
+    const playerRacketPosition = this.racketRigidBody.translation();
+    const opponentRacketPosition = this.opponentRacketRigidBody.translation();
+
+    if (!ballPosition || !playerRacketPosition || !opponentRacketPosition)
+      return;
+
+    // Broadcast the positions to all connected clients
+    this.broadcast("update-positions", {
+      ball: { x: ballPosition.x, y: ballPosition.y, z: ballPosition.z },
+      playerRacket: {
+        x: playerRacketPosition.x,
+        y: playerRacketPosition.y,
+        z: playerRacketPosition.z,
+      },
+      opponentRacket: {
+        x: opponentRacketPosition.x,
+        y: opponentRacketPosition.y,
+        z: opponentRacketPosition.z,
+      },
     });
   }
 
@@ -117,51 +215,50 @@ export class MyRoom extends Room<MyRoomState> {
       this.playersMap.set(client.sessionId, {
         id: client.sessionId,
         isHost: true,
-        isHandlingBall: true,
         score: 0,
-        position: { x: 0, y: 0 },
+        mousePosition: { x: 0, y: 0 },
         playerName: options.playerName,
         playerColor: options.playerColor,
       });
       this.hostId = client.sessionId;
-      this.playerHandlingBall = client.sessionId;
       return;
     }
 
     this.playersMap.set(client.sessionId, {
       id: client.sessionId,
       isHost: false,
-      isHandlingBall: false,
       score: 0,
-      position: { x: 0, y: 0 },
+      mousePosition: { x: 0, y: 0 },
       playerName: options.playerName,
       playerColor: options.playerColor,
     });
 
+    this.opponentId = client.sessionId;
+
     const listOfPlayers = Array.from(this.playersMap.values());
+
+    this.foundMatch();
 
     this.broadcast("found-match", {
       hostId: this.hostId,
       players: listOfPlayers,
     });
 
-    setTimeout(() => {
-      this.broadcast("match-started");
-    }, 3000);
+    this.broadcast("match-started"); // temporary
+
+    // setTimeout(() => {
+    //   this.broadcast("match-started");
+    // }, 3000);
   }
 
   handleScore(playerId: string) {
     this.broadcast("scored", playerId);
-    this.playerLastTableHit = undefined;
 
     setTimeout(() => {
       this.playersMap.forEach((player) => {
         if (player.id === playerId) {
           player.score += 1;
-          player.isHandlingBall = true;
-          this.playerHandlingBall = player.id;
-        } else {
-          player.isHandlingBall = false;
+          this.resetBallPosition(player.isHost);
         }
       });
 
@@ -171,9 +268,23 @@ export class MyRoom extends Room<MyRoomState> {
         this.broadcast("winner", winner);
         return;
       }
-
-      this.broadcast("serve", { playerId });
     }, 1000);
+  }
+
+  resetBallPosition(isHost: boolean) {
+    this.playerLastTableHit = undefined;
+    this.touchedLastBy = undefined;
+
+    this.ballRigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    this.ballRigidBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    this.ballRigidBody.setTranslation(
+      {
+        x: 0,
+        y: 10,
+        z: isHost ? 30 : -30,
+      },
+      true
+    );
   }
 
   checkForWinner() {
@@ -198,8 +309,8 @@ export class MyRoom extends Room<MyRoomState> {
     this.hostId = undefined;
     this.opponentId = undefined;
 
-    this.playerHandlingBall = undefined;
     this.playerLastTableHit = undefined;
+    this.clock.clear();
   }
 }
 
