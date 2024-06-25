@@ -8,7 +8,7 @@ import {
   handleBallOut,
   racketHitBall,
 } from "../physics/events";
-import { BROADCAST_STEP, PHYSICS_STEP } from "../config";
+import { BROADCAST_STEP, PHYSICS_STEP, PLAYER_SPEED } from "../config";
 import { generateRandomString } from "../utils";
 
 type PlayerType = {
@@ -155,14 +155,15 @@ export class MyRoom extends Room<MyRoomState> {
       return;
     }
 
-    const lerpFactor = 0.1;
     const currentPosition = player.racketRigidBody?.translation();
     const targetPosition = player.mousePosition;
     const interpolatedPosition = {
       x:
-        currentPosition.x + lerpFactor * (targetPosition.x - currentPosition.x),
+        currentPosition.x +
+        PLAYER_SPEED * (targetPosition.x - currentPosition.x),
       y:
-        currentPosition.y + lerpFactor * (targetPosition.y - currentPosition.y),
+        currentPosition.y +
+        PLAYER_SPEED * (targetPosition.y - currentPosition.y),
       z: currentPosition.z,
     };
 
