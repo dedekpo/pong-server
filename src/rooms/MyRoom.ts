@@ -9,6 +9,7 @@ import {
   racketHitBall,
 } from "../physics/events";
 import { BROADCAST_STEP, PHYSICS_STEP } from "../config";
+import { generateRandomString } from "../utils";
 
 type PlayerType = {
   id: string;
@@ -45,98 +46,130 @@ export class MyRoom extends Room<MyRoomState> {
   playerLastTableHit: string;
   touchedLastBy: string;
 
+  rematchVotes = 0;
+
+  matchState: "waiting" | "playing" | "serving" | "ended" = "waiting";
+
   onCreate(options: any) {
     if (options.private) {
       this.setPrivate(true);
       this.roomId = generateRandomString();
     }
 
-    this.onMessage("update", (client, { x, y }) => {
-      const player = this.playersMap.get(client.sessionId);
-      if (!player) return;
-      player.mousePosition = {
-        x,
-        y,
-      };
+    this.onMessage("update", this.handleUpdateMessage.bind(this));
+
+    this.onMessage("rematch-vote", (client, { vote }) => {
+      if (vote === "DECLINE") {
+        this.broadcast("declined-rematch");
+        this.disconnect(); // Dispose room
+        return;
+      }
+
+      this.rematchVotes++;
+
+      // If 2 votes are received, start a new game
+      if (this.rematchVotes >= 2) {
+        this.broadcast("rematch");
+
+        this.playersMap.forEach((player) => {
+          player.score = 0;
+        });
+        this.rematchVotes = 0;
+
+        setTimeout(() => {
+          this.matchState = "serving";
+        }, 3000);
+
+        return;
+      }
+
+      this.broadcast("voted-rematch", client.sessionId);
     });
+  }
+
+  handleUpdateMessage(client: Client, { x, y }: { x: number; y: number }) {
+    const player = this.playersMap.get(client.sessionId);
+    if (!player) return;
+    player.mousePosition = { x, y };
   }
 
   foundMatch() {
+    this.broadcast("found-match", {
+      hostId: this.hostId,
+      players: Array.from(this.playersMap.values()),
+    });
+
     RAPIER.init().then(() => {
-      const {
-        world,
-        ball,
-        racket,
-        opponentRacket,
-        opponentTable,
-        playerTable,
-        ballOutSensor,
-      } = initPhysics();
-      this.world = world;
-      this.ballRigidBody = ball;
-      this.racketRigidBody = racket;
-      this.opponentRacketRigidBody = opponentRacket;
-      this.playerTableBody = playerTable;
-      this.opponentTableBody = opponentTable;
-      this.ballOutSensor = ballOutSensor;
-
-      for (const player of this.playersMap.values()) {
-        if (player.isHost) {
-          player.racketRigidBody = this.racketRigidBody;
-        } else {
-          player.racketRigidBody = this.opponentRacketRigidBody;
-        }
-      }
-
-      this.setSimulationInterval(
-        (deltaTime) => this.update(deltaTime),
-        PHYSICS_STEP
+      this.initializePhysics();
+      this.setSimulationInterval(this.update.bind(this), PHYSICS_STEP);
+      this.clock.setInterval(
+        this.broadcastPositions.bind(this),
+        BROADCAST_STEP
       );
-
-      this.clock.setInterval(() => {
-        this.broadcastPositions();
-      }, BROADCAST_STEP);
     });
   }
 
+  initializePhysics() {
+    const {
+      world,
+      ball,
+      racket,
+      opponentRacket,
+      opponentTable,
+      playerTable,
+      ballOutSensor,
+    } = initPhysics();
+    this.world = world;
+    this.ballRigidBody = ball;
+    this.racketRigidBody = racket;
+    this.opponentRacketRigidBody = opponentRacket;
+    this.playerTableBody = playerTable;
+    this.opponentTableBody = opponentTable;
+    this.ballOutSensor = ballOutSensor;
+
+    this.playersMap.forEach((player) => {
+      player.racketRigidBody = player.isHost
+        ? this.racketRigidBody
+        : this.opponentRacketRigidBody;
+    });
+  }
   update(deltaTime: number) {
-    // Event queue for detecting collisions
+    if (this.matchState === "waiting" || this.matchState === "ended") return;
+
     let eventQueue = new RAPIER.EventQueue(true);
-    // Step the physics world
     this.world.step(eventQueue);
 
-    for (const player of this.playersMap.values()) {
-      // // Determine the interpolation speed factor
-      const lerpFactor = 0.1; // Adjust this value to change the smoothness
-      const currentPosition = player.racketRigidBody?.translation();
-      const targetPosition = player.mousePosition;
+    this.playersMap.forEach((player) => {
+      this.updatePlayerPosition(player);
+    });
 
-      // // Calculate the interpolated position
-      const interpolatedPosition = {
-        x:
-          currentPosition.x +
-          lerpFactor * (targetPosition.x - currentPosition.x),
-        y:
-          currentPosition.y +
-          lerpFactor * (targetPosition.y - currentPosition.y),
-        z: currentPosition.z,
-      };
+    this.handleCollisionEvents(eventQueue);
+  }
 
-      // // Set the new interpolated position
-      if (player.isHost) {
-        player.racketRigidBody.setTranslation(
-          {
-            x: 0,
-            y: 5,
-            z: 30,
-          },
-          true
-        );
-      } else {
-        player.racketRigidBody.setTranslation(interpolatedPosition, true);
-      }
+  updatePlayerPosition(player: PlayerType) {
+    if (this.matchState === "serving") {
+      player.racketRigidBody.setTranslation(
+        { x: 0, y: 5, z: player.isHost ? 30 : -30 },
+        true
+      );
+      return;
     }
 
+    const lerpFactor = 0.1;
+    const currentPosition = player.racketRigidBody?.translation();
+    const targetPosition = player.mousePosition;
+    const interpolatedPosition = {
+      x:
+        currentPosition.x + lerpFactor * (targetPosition.x - currentPosition.x),
+      y:
+        currentPosition.y + lerpFactor * (targetPosition.y - currentPosition.y),
+      z: currentPosition.z,
+    };
+
+    player.racketRigidBody.setTranslation(interpolatedPosition, true);
+  }
+
+  handleCollisionEvents(eventQueue: RAPIER.EventQueue) {
     eventQueue.drainCollisionEvents((handle1, handle2, started) => {
       if (
         handle1 === this.ballRigidBody.handle &&
@@ -148,43 +181,37 @@ export class MyRoom extends Room<MyRoomState> {
     });
 
     eventQueue.drainContactForceEvents((event) => {
-      let handle1 = event.collider1(); // Handle of the first collider involved in the event.
-      let handle2 = event.collider2(); // Handle of the second collider involved in the event.
-      /* Handle the contact force event. */
+      const handle1 = event.collider1();
+      const handle2 = event.collider2();
 
       if (
         handle1 === this.ballRigidBody.handle &&
         handle2 === this.racketRigidBody.handle
       ) {
+        this.matchState = "playing";
         racketHitBall(this.ballRigidBody, this.racketRigidBody);
         this.touchedLastBy = this.hostId;
-      }
-      if (
+      } else if (
         handle1 === this.ballRigidBody.handle &&
         handle2 === this.opponentRacketRigidBody.handle
       ) {
+        this.matchState = "playing";
         racketHitBall(this.ballRigidBody, this.opponentRacketRigidBody);
         this.touchedLastBy = this.opponentId;
-      }
-      if (
+      } else if (
         handle1 === this.playerTableBody.handle &&
         handle2 === this.ballRigidBody.handle
       ) {
         ballHitPlayerTable(this);
-      }
-      if (
+      } else if (
         handle1 === this.opponentTableBody.handle &&
         handle2 === this.ballRigidBody.handle
       ) {
         ballHitOpponentTable(this);
       }
     });
-
-    // this.broadcastPositions();
   }
-
   broadcastPositions() {
-    // Get the positions of the ball and rackets
     const ballPosition = this.ballRigidBody.translation();
     const playerRacketPosition = this.racketRigidBody.translation();
     const opponentRacketPosition = this.opponentRacketRigidBody.translation();
@@ -192,7 +219,6 @@ export class MyRoom extends Room<MyRoomState> {
     if (!ballPosition || !playerRacketPosition || !opponentRacketPosition)
       return;
 
-    // Broadcast the positions to all connected clients
     this.broadcast("update-positions", {
       ball: { x: ballPosition.x, y: ballPosition.y, z: ballPosition.z },
       playerRacket: {
@@ -235,20 +261,12 @@ export class MyRoom extends Room<MyRoomState> {
 
     this.opponentId = client.sessionId;
 
-    const listOfPlayers = Array.from(this.playersMap.values());
-
     this.foundMatch();
 
-    this.broadcast("found-match", {
-      hostId: this.hostId,
-      players: listOfPlayers,
-    });
-
-    this.broadcast("match-started"); // temporary
-
-    // setTimeout(() => {
-    //   this.broadcast("match-started");
-    // }, 3000);
+    setTimeout(() => {
+      this.matchState = "serving";
+      this.broadcast("match-started");
+    }, 3000);
   }
 
   handleScore(playerId: string) {
@@ -265,6 +283,7 @@ export class MyRoom extends Room<MyRoomState> {
       const winner = this.checkForWinner();
 
       if (winner) {
+        this.matchState = "ended";
         this.broadcast("winner", winner);
         return;
       }
@@ -274,6 +293,7 @@ export class MyRoom extends Room<MyRoomState> {
   resetBallPosition(isHost: boolean) {
     this.playerLastTableHit = undefined;
     this.touchedLastBy = undefined;
+    this.matchState = "serving";
 
     this.ballRigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
     this.ballRigidBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
@@ -296,6 +316,15 @@ export class MyRoom extends Room<MyRoomState> {
 
   onLeave(client: Client, consented: boolean) {
     console.log(client.sessionId, "left!");
+    // this.state.players.delete(client.sessionId);
+    // let winner;
+    // for (let [key, value] of this.state.players.entries()) {
+    //   if (client.sessionId !== key) {
+    //     winner = key;
+    //   }
+    // }
+
+    // this.terminateRoom(winner);
   }
 
   onDispose() {
@@ -312,18 +341,4 @@ export class MyRoom extends Room<MyRoomState> {
     this.playerLastTableHit = undefined;
     this.clock.clear();
   }
-}
-
-function generateRandomString(length: number = 5): string {
-  const characters =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  let result = "";
-  const charactersLength = characters.length;
-
-  for (let i = 0; i < length; i++) {
-    const randomIndex = Math.floor(Math.random() * charactersLength);
-    result += characters[randomIndex];
-  }
-
-  return result;
 }
