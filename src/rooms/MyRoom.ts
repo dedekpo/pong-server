@@ -5,23 +5,28 @@ import { initPhysics } from "../physics/physics";
 import {
   ballHitOpponentTable,
   ballHitPlayerTable,
+  handleBallHitBlocker,
   handleBallOut,
   racketHitBall,
 } from "../physics/events";
 import { BROADCAST_STEP, PHYSICS_STEP, PLAYER_SPEED } from "../config";
 import { generateRandomString } from "../utils";
 
-type PlayerType = {
+type PowerUpsType =
+  | "super-hit"
+  | "super-curve"
+  | "increase-size"
+  | "slow-motion"
+  | "camera-shake";
+
+export type PlayerType = {
   id: string;
   isHost: boolean;
   score: number;
-  mousePosition: {
-    x: number;
-    y: number;
-  };
   playerName?: string;
   playerColor?: string;
   racketRigidBody?: RAPIER.RigidBody;
+  powerUp?: PowerUpsType;
 };
 
 export class MyRoom extends Room<MyRoomState> {
@@ -32,6 +37,7 @@ export class MyRoom extends Room<MyRoomState> {
   playerTableBody: RAPIER.RigidBody;
   opponentTableBody: RAPIER.RigidBody;
   ballOutSensor: RAPIER.Collider;
+  blockerCollider: RAPIER.Collider;
 
   maxClients = 2;
 
@@ -42,13 +48,15 @@ export class MyRoom extends Room<MyRoomState> {
   };
   hostId: string;
   opponentId: string;
-
   playerLastTableHit: string;
   touchedLastBy: string;
-
   rematchVotes = 0;
-
   matchState: "waiting" | "playing" | "serving" | "ended" = "waiting";
+  canScore: boolean = true;
+  slowMotion = {
+    active: false,
+    time: 0,
+  };
 
   onCreate(options: any) {
     if (options.private) {
@@ -57,6 +65,57 @@ export class MyRoom extends Room<MyRoomState> {
     }
 
     this.onMessage("update", this.handleUpdateMessage.bind(this));
+
+    this.onMessage("increase-size", (client) => {
+      const player = this.playersMap.get(client.sessionId);
+      player.racketRigidBody
+        .collider(0)
+        .setHalfExtents({ x: 4.5, y: 5, z: 0.2 });
+
+      setTimeout(() => {
+        player.racketRigidBody
+          .collider(0)
+          .setHalfExtents({ x: 2.2, y: 2.4, z: 0.2 });
+      }, 5 * 1000);
+
+      this.broadcast("increase-size", {
+        player: client.sessionId,
+      });
+    });
+
+    this.onMessage("spawn-power-up", (client, positionToSpawn) => {
+      this.broadcast("spawn-power-up", {
+        player: client.sessionId,
+        position: positionToSpawn,
+      });
+    });
+
+    this.onMessage("remove-power-up", (client) => {
+      this.broadcast("remove-power-up", {
+        player: client.sessionId,
+      });
+    });
+
+    this.onMessage("grabbed-power-up", (client, powerUp: PowerUpsType) => {
+      const player = this.playersMap.get(client.sessionId);
+      this.broadcast("grabbed-power-up", {
+        player: client.sessionId,
+        powerUp,
+      });
+      if (
+        powerUp === "super-hit" ||
+        powerUp === "super-curve" ||
+        powerUp === "increase-size"
+      ) {
+        player.powerUp = powerUp;
+      }
+      if (powerUp === "slow-motion" && !this.slowMotion.active) {
+        this.slowMotion.active = true;
+        setTimeout(() => {
+          this.slowMotion.active = false;
+        }, 6000);
+      }
+    });
 
     this.onMessage("rematch-vote", (client, { vote }) => {
       if (vote === "DECLINE") {
@@ -89,8 +148,21 @@ export class MyRoom extends Room<MyRoomState> {
 
   handleUpdateMessage(client: Client, { x, y }: { x: number; y: number }) {
     const player = this.playersMap.get(client.sessionId);
+
     if (!player) return;
-    player.mousePosition = { x, y };
+
+    if (this.matchState === "serving") {
+      player.racketRigidBody?.setTranslation(
+        { x: 0, y: 4, z: player.isHost ? 30 : -30 },
+        true
+      );
+      return;
+    }
+
+    player.racketRigidBody?.setTranslation(
+      { x, y, z: player.isHost ? 30 : -30 },
+      true
+    );
   }
 
   foundMatch() {
@@ -118,6 +190,7 @@ export class MyRoom extends Room<MyRoomState> {
       opponentTable,
       playerTable,
       ballOutSensor,
+      blocker,
     } = initPhysics();
     this.world = world;
     this.ballRigidBody = ball;
@@ -126,6 +199,7 @@ export class MyRoom extends Room<MyRoomState> {
     this.playerTableBody = playerTable;
     this.opponentTableBody = opponentTable;
     this.ballOutSensor = ballOutSensor;
+    this.blockerCollider = blocker;
 
     this.playersMap.forEach((player) => {
       player.racketRigidBody = player.isHost
@@ -136,38 +210,17 @@ export class MyRoom extends Room<MyRoomState> {
   update(deltaTime: number) {
     if (this.matchState === "waiting" || this.matchState === "ended") return;
 
-    let eventQueue = new RAPIER.EventQueue(true);
-    this.world.step(eventQueue);
-
-    this.playersMap.forEach((player) => {
-      this.updatePlayerPosition(player);
-    });
-
-    this.handleCollisionEvents(eventQueue);
-  }
-
-  updatePlayerPosition(player: PlayerType) {
-    if (this.matchState === "serving") {
-      player.racketRigidBody.setTranslation(
-        { x: 0, y: 5, z: player.isHost ? 30 : -30 },
-        true
-      );
+    if (this.slowMotion.active && this.slowMotion.time > 0) {
+      this.slowMotion.time = 0;
       return;
     }
 
-    const currentPosition = player.racketRigidBody?.translation();
-    const targetPosition = player.mousePosition;
-    const interpolatedPosition = {
-      x:
-        currentPosition.x +
-        PLAYER_SPEED * (targetPosition.x - currentPosition.x),
-      y:
-        currentPosition.y +
-        PLAYER_SPEED * (targetPosition.y - currentPosition.y),
-      z: currentPosition.z,
-    };
+    this.slowMotion.time++;
 
-    player.racketRigidBody.setTranslation(interpolatedPosition, true);
+    let eventQueue = new RAPIER.EventQueue(true);
+    this.world.step(eventQueue);
+
+    this.handleCollisionEvents(eventQueue);
   }
 
   handleCollisionEvents(eventQueue: RAPIER.EventQueue) {
@@ -178,6 +231,13 @@ export class MyRoom extends Room<MyRoomState> {
         started
       ) {
         handleBallOut(this);
+      }
+      if (
+        handle1 === this.blockerCollider.handle &&
+        handle2 === this.ballRigidBody.handle &&
+        started
+      ) {
+        handleBallHitBlocker(this.ballRigidBody);
       }
     });
 
@@ -190,14 +250,28 @@ export class MyRoom extends Room<MyRoomState> {
         handle2 === this.racketRigidBody.handle
       ) {
         this.matchState = "playing";
-        racketHitBall(this.ballRigidBody, this.racketRigidBody);
+        const player = this.playersMap.get(this.hostId);
+        const needToRemovePowerUp =
+          player.powerUp === "super-curve" || player.powerUp === "super-hit";
+        this.broadcast("racket-hit-ball", {
+          player: player.id,
+          needToRemovePowerUp,
+        });
+        racketHitBall(this.ballRigidBody, this.racketRigidBody, player);
         this.touchedLastBy = this.hostId;
       } else if (
         handle1 === this.ballRigidBody.handle &&
         handle2 === this.opponentRacketRigidBody.handle
       ) {
         this.matchState = "playing";
-        racketHitBall(this.ballRigidBody, this.opponentRacketRigidBody);
+        const player = this.playersMap.get(this.opponentId);
+        const needToRemovePowerUp =
+          player.powerUp === "super-curve" || player.powerUp === "super-hit";
+        this.broadcast("racket-hit-ball", {
+          player: player.id,
+          needToRemovePowerUp,
+        });
+        racketHitBall(this.ballRigidBody, this.opponentRacketRigidBody, player);
         this.touchedLastBy = this.opponentId;
       } else if (
         handle1 === this.playerTableBody.handle &&
@@ -243,7 +317,6 @@ export class MyRoom extends Room<MyRoomState> {
         id: client.sessionId,
         isHost: true,
         score: 0,
-        mousePosition: { x: 0, y: 0 },
         playerName: options.playerName,
         playerColor: options.playerColor,
       });
@@ -255,7 +328,6 @@ export class MyRoom extends Room<MyRoomState> {
       id: client.sessionId,
       isHost: false,
       score: 0,
-      mousePosition: { x: 0, y: 0 },
       playerName: options.playerName,
       playerColor: options.playerColor,
     });
@@ -271,7 +343,11 @@ export class MyRoom extends Room<MyRoomState> {
   }
 
   handleScore(playerId: string) {
+    if (!this.canScore) return;
+
     this.broadcast("scored", playerId);
+
+    this.canScore = false;
 
     setTimeout(() => {
       this.playersMap.forEach((player) => {
@@ -281,13 +357,15 @@ export class MyRoom extends Room<MyRoomState> {
         }
       });
 
-      const winner = this.checkForWinner();
+      this.canScore = true;
 
-      if (winner) {
-        this.matchState = "ended";
-        this.broadcast("winner", winner);
-        return;
-      }
+      // const winner = this.checkForWinner(); // todo - remove
+
+      // if (winner) {
+      //   this.matchState = "ended";
+      //   this.broadcast("winner", winner);
+      //   return;
+      // }
     }, 1000);
   }
 
@@ -296,6 +374,7 @@ export class MyRoom extends Room<MyRoomState> {
     this.touchedLastBy = undefined;
     this.matchState = "serving";
 
+    this.ballRigidBody.resetForces(true);
     this.ballRigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
     this.ballRigidBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
     this.ballRigidBody.setTranslation(

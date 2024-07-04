@@ -16,7 +16,7 @@ function createPlayerTable(world: RAPIER.World) {
 
   let playerTableColliderDesc = RAPIER.ColliderDesc.cuboid(20, 0.5, 15)
     .setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS)
-    .setContactForceEventThreshold(10)
+    .setContactForceEventThreshold(30)
     .setRestitution(0.7)
     .setFriction(0.9);
 
@@ -39,7 +39,7 @@ function createOpponentTable(world: RAPIER.World) {
 
   let opponentTableColliderDesc = RAPIER.ColliderDesc.cuboid(20, 0.5, 15)
     .setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS)
-    .setContactForceEventThreshold(10)
+    .setContactForceEventThreshold(30)
     .setRestitution(0.7)
     .setFriction(0.9);
 
@@ -59,7 +59,7 @@ function createBall(world: RAPIER.World) {
 
   let ballColliderDesc = RAPIER.ColliderDesc.ball(0.2)
     .setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS)
-    .setContactForceEventThreshold(10)
+    .setContactForceEventThreshold(30)
     .setRestitution(1)
     .setMass(0.1);
 
@@ -124,11 +124,34 @@ function createBallOutSensor(world: RAPIER.World) {
   return collider;
 }
 
+function createBlocker(world: RAPIER.World) {
+  let blockerRigidBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(
+    0,
+    -0.3,
+    0
+  );
+
+  let blockerRigidBody = world.createRigidBody(blockerRigidBodyDesc);
+
+  let blockerColliderDesc = RAPIER.ColliderDesc.cuboid(40, 1.5, 0.2)
+    .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS)
+    .setContactForceEventThreshold(30)
+    .setFriction(0.9);
+
+  const blockerCollider = world.createCollider(
+    blockerColliderDesc,
+    blockerRigidBody
+  );
+
+  return blockerCollider;
+}
+
 export function initPhysics() {
   const world = createWorld();
 
   const playerTable = createPlayerTable(world);
   const opponentTable = createOpponentTable(world);
+  const blocker = createBlocker(world);
   const ball = createBall(world);
   const racket = createRacket(world);
 
@@ -143,6 +166,7 @@ export function initPhysics() {
     opponentRacket,
     playerTable,
     opponentTable,
+    blocker,
     ballOutSensor,
   };
 }

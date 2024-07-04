@@ -1,11 +1,12 @@
 import RAPIER from "@dimforge/rapier3d-compat";
 import * as THREE from "three";
 import { getHitPrecision } from "./utils";
-import { MyRoom } from "../rooms/MyRoom";
+import { MyRoom, PlayerType } from "../rooms/MyRoom";
 
 export function racketHitBall(
   ball: RAPIER.RigidBody,
-  racket: RAPIER.RigidBody
+  racket: RAPIER.RigidBody,
+  player: PlayerType
 ) {
   const racketWorldPosition = racket.translation();
   const racketVector = new THREE.Vector3(
@@ -54,6 +55,7 @@ export function racketHitBall(
 
   ball.setLinvel({ x: 0, y: 0, z: 0 }, true);
   ball.setAngvel({ x: 0, y: 0, z: 0 }, true);
+  ball.resetForces(true);
   ball.applyImpulse(
     {
       x: normalizedAndScaledDirection.x + xVariation,
@@ -62,6 +64,31 @@ export function racketHitBall(
     },
     true
   );
+  if (player.powerUp === "super-curve") {
+    ball.addForce(
+      {
+        x: targetPosition.x > 0 ? -3 : 3,
+        y: 0,
+        z: 0,
+      },
+      true
+    );
+    player.powerUp = undefined;
+    return;
+  }
+
+  if (player.powerUp === "super-hit") {
+    ball.addForce(
+      {
+        x: 0,
+        y: -3,
+        z: 12 * playeModifier,
+      },
+      true
+    );
+    player.powerUp = undefined;
+    return;
+  }
 }
 
 export function ballHitPlayerTable(room: MyRoom) {
@@ -100,4 +127,15 @@ export function handleBallOut(room: MyRoom) {
     return;
   }
   room.handleScore(room.hostId);
+}
+
+export function handleBallHitBlocker(ballApi: RAPIER.RigidBody) {
+  if (!ballApi) return;
+  const ballVelocity = ballApi.linvel();
+  const decreasedBallVelocity = {
+    x: ballVelocity.x * 0.1,
+    y: ballVelocity.y * 0.1,
+    z: ballVelocity.z * 0.1,
+  };
+  ballApi.setLinvel(decreasedBallVelocity, true);
 }
