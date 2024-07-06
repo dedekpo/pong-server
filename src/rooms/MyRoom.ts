@@ -23,6 +23,10 @@ export type PlayerType = {
   id: string;
   isHost: boolean;
   score: number;
+  mousePosition: {
+    x: number;
+    y: number;
+  };
   playerName?: string;
   playerColor?: string;
   racketRigidBody?: RAPIER.RigidBody;
@@ -148,21 +152,8 @@ export class MyRoom extends Room<MyRoomState> {
 
   handleUpdateMessage(client: Client, { x, y }: { x: number; y: number }) {
     const player = this.playersMap.get(client.sessionId);
-
     if (!player) return;
-
-    if (this.matchState === "serving") {
-      player.racketRigidBody?.setTranslation(
-        { x: 0, y: 4, z: player.isHost ? 30 : -30 },
-        true
-      );
-      return;
-    }
-
-    player.racketRigidBody?.setTranslation(
-      { x, y, z: player.isHost ? 30 : -30 },
-      true
-    );
+    player.mousePosition = { x, y };
   }
 
   foundMatch() {
@@ -207,6 +198,31 @@ export class MyRoom extends Room<MyRoomState> {
         : this.opponentRacketRigidBody;
     });
   }
+
+  updatePlayerPosition(player: PlayerType) {
+    if (this.matchState === "serving") {
+      player.racketRigidBody.setTranslation(
+        { x: 0, y: 5, z: player.isHost ? 30 : -30 },
+        true
+      );
+      return;
+    }
+
+    const currentPosition = player.racketRigidBody?.translation();
+    const targetPosition = player.mousePosition;
+    const interpolatedPosition = {
+      x:
+        currentPosition.x +
+        PLAYER_SPEED * (targetPosition.x - currentPosition.x),
+      y:
+        currentPosition.y +
+        PLAYER_SPEED * (targetPosition.y - currentPosition.y),
+      z: currentPosition.z,
+    };
+
+    player.racketRigidBody.setTranslation(interpolatedPosition, true);
+  }
+
   update(deltaTime: number) {
     if (this.matchState === "waiting" || this.matchState === "ended") return;
 
@@ -219,6 +235,10 @@ export class MyRoom extends Room<MyRoomState> {
 
     let eventQueue = new RAPIER.EventQueue(true);
     this.world.step(eventQueue);
+
+    this.playersMap.forEach((player) => {
+      this.updatePlayerPosition(player);
+    });
 
     this.handleCollisionEvents(eventQueue);
   }
@@ -251,12 +271,6 @@ export class MyRoom extends Room<MyRoomState> {
       ) {
         this.matchState = "playing";
         const player = this.playersMap.get(this.hostId);
-        const needToRemovePowerUp =
-          player.powerUp === "super-curve" || player.powerUp === "super-hit";
-        this.broadcast("racket-hit-ball", {
-          player: player.id,
-          needToRemovePowerUp,
-        });
         racketHitBall(this.ballRigidBody, this.racketRigidBody, player);
         this.touchedLastBy = this.hostId;
       } else if (
@@ -265,12 +279,6 @@ export class MyRoom extends Room<MyRoomState> {
       ) {
         this.matchState = "playing";
         const player = this.playersMap.get(this.opponentId);
-        const needToRemovePowerUp =
-          player.powerUp === "super-curve" || player.powerUp === "super-hit";
-        this.broadcast("racket-hit-ball", {
-          player: player.id,
-          needToRemovePowerUp,
-        });
         racketHitBall(this.ballRigidBody, this.opponentRacketRigidBody, player);
         this.touchedLastBy = this.opponentId;
       } else if (
@@ -317,6 +325,7 @@ export class MyRoom extends Room<MyRoomState> {
         id: client.sessionId,
         isHost: true,
         score: 0,
+        mousePosition: { x: 0, y: 0 },
         playerName: options.playerName,
         playerColor: options.playerColor,
       });
@@ -328,6 +337,7 @@ export class MyRoom extends Room<MyRoomState> {
       id: client.sessionId,
       isHost: false,
       score: 0,
+      mousePosition: { x: 0, y: 0 },
       playerName: options.playerName,
       playerColor: options.playerColor,
     });
@@ -396,13 +406,13 @@ export class MyRoom extends Room<MyRoomState> {
 
   onLeave(client: Client, consented: boolean) {
     console.log(client.sessionId, "left!");
-    // this.state.players.delete(client.sessionId);
-    // let winner;
-    // for (let [key, value] of this.state.players.entries()) {
+    // let winner; // TODO
+    // for (let [key, value] of this.playersMap.entries()) {
     //   if (client.sessionId !== key) {
     //     winner = key;
     //   }
     // }
+    // this.playersMap.delete(client.sessionId);
 
     // this.terminateRoom(winner);
   }
