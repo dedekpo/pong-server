@@ -4,10 +4,13 @@ import { getHitPrecision } from "./utils";
 import { MyRoom, PlayerType } from "../rooms/MyRoom";
 
 export function racketHitBall(
+  room: MyRoom,
   ball: RAPIER.RigidBody,
   racket: RAPIER.RigidBody,
   player: PlayerType
 ) {
+  room.broadcast("set-show-trail", true);
+
   const racketWorldPosition = racket.translation();
   const racketVector = new THREE.Vector3(
     racketWorldPosition.x,
@@ -64,7 +67,9 @@ export function racketHitBall(
     },
     true
   );
-  if (player.powerUp === "super-curve") {
+
+  if (player.powerUp === "super-curve" && player.powerUpActive) {
+    room.broadcast("ball-changed-trail", "super-curve");
     ball.addForce(
       {
         x: targetPosition.x > 0 ? -3 : 3,
@@ -74,21 +79,26 @@ export function racketHitBall(
       true
     );
     player.powerUp = undefined;
+    player.powerUpActive = false;
     return;
   }
 
-  if (player.powerUp === "super-hit") {
+  if (player.powerUp === "super-hit" && player.powerUpActive) {
+    room.broadcast("ball-changed-trail", "super-hit");
     ball.addForce(
       {
         x: 0,
-        y: -3,
-        z: 12 * playeModifier,
+        y: -2.5,
+        z: 10 * playeModifier,
       },
       true
     );
     player.powerUp = undefined;
+    player.powerUpActive = false;
     return;
   }
+
+  room.broadcast("ball-changed-trail", "none");
 }
 
 export function ballHitPlayerTable(room: MyRoom) {

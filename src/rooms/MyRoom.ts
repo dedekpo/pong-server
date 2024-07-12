@@ -31,6 +31,7 @@ export type PlayerType = {
   playerColor?: string;
   racketRigidBody?: RAPIER.RigidBody;
   powerUp?: PowerUpsType;
+  powerUpActive: boolean;
 };
 
 export class MyRoom extends Room<MyRoomState> {
@@ -70,23 +71,6 @@ export class MyRoom extends Room<MyRoomState> {
 
     this.onMessage("update", this.handleUpdateMessage.bind(this));
 
-    this.onMessage("increase-size", (client) => {
-      const player = this.playersMap.get(client.sessionId);
-      player.racketRigidBody
-        .collider(0)
-        .setHalfExtents({ x: 4.5, y: 5, z: 0.2 });
-
-      setTimeout(() => {
-        player.racketRigidBody
-          .collider(0)
-          .setHalfExtents({ x: 2.2, y: 2.4, z: 0.2 });
-      }, 5 * 1000);
-
-      this.broadcast("increase-size", {
-        player: client.sessionId,
-      });
-    });
-
     this.onMessage("spawn-power-up", (client, positionToSpawn) => {
       this.broadcast("spawn-power-up", {
         player: client.sessionId,
@@ -106,18 +90,41 @@ export class MyRoom extends Room<MyRoomState> {
         player: client.sessionId,
         powerUp,
       });
-      if (
-        powerUp === "super-hit" ||
-        powerUp === "super-curve" ||
-        powerUp === "increase-size"
-      ) {
-        player.powerUp = powerUp;
-      }
-      if (powerUp === "slow-motion" && !this.slowMotion.active) {
+      player.powerUp = powerUp;
+    });
+
+    this.onMessage("power-up-ready", (client) => {
+      const player = this.playersMap.get(client.sessionId);
+
+      this.broadcast("power-up-ready", {
+        player: client.sessionId,
+      });
+
+      player.powerUpActive = true;
+
+      if (player.powerUp === "slow-motion" && !this.slowMotion.active) {
         this.slowMotion.active = true;
         setTimeout(() => {
           this.slowMotion.active = false;
+          player.powerUpActive = false;
         }, 6000);
+      }
+
+      if (player.powerUp === "increase-size") {
+        player.racketRigidBody
+          .collider(0)
+          .setHalfExtents({ x: 4.5, y: 5, z: 0.3 });
+
+        setTimeout(() => {
+          player.racketRigidBody
+            .collider(0)
+            .setHalfExtents({ x: 2.2, y: 2.4, z: 0.3 });
+          player.powerUpActive = false;
+        }, 8 * 1000);
+
+        this.broadcast("increase-size", {
+          player: client.sessionId,
+        });
       }
     });
 
@@ -201,8 +208,10 @@ export class MyRoom extends Room<MyRoomState> {
 
   updatePlayerPosition(player: PlayerType) {
     if (this.matchState === "serving") {
+      const isIncreased =
+        player.powerUp === "increase-size" && player.powerUpActive;
       player.racketRigidBody.setTranslation(
-        { x: 0, y: 5, z: player.isHost ? 30 : -30 },
+        { x: 0, y: isIncreased ? 3 : 5, z: player.isHost ? 30 : -30 },
         true
       );
       return;
@@ -271,7 +280,7 @@ export class MyRoom extends Room<MyRoomState> {
       ) {
         this.matchState = "playing";
         const player = this.playersMap.get(this.hostId);
-        racketHitBall(this.ballRigidBody, this.racketRigidBody, player);
+        racketHitBall(this, this.ballRigidBody, this.racketRigidBody, player);
         this.touchedLastBy = this.hostId;
       } else if (
         handle1 === this.ballRigidBody.handle &&
@@ -279,7 +288,12 @@ export class MyRoom extends Room<MyRoomState> {
       ) {
         this.matchState = "playing";
         const player = this.playersMap.get(this.opponentId);
-        racketHitBall(this.ballRigidBody, this.opponentRacketRigidBody, player);
+        racketHitBall(
+          this,
+          this.ballRigidBody,
+          this.opponentRacketRigidBody,
+          player
+        );
         this.touchedLastBy = this.opponentId;
       } else if (
         handle1 === this.playerTableBody.handle &&
@@ -328,6 +342,7 @@ export class MyRoom extends Room<MyRoomState> {
         mousePosition: { x: 0, y: 0 },
         playerName: options.playerName,
         playerColor: options.playerColor,
+        powerUpActive: false,
       });
       this.hostId = client.sessionId;
       return;
@@ -340,6 +355,7 @@ export class MyRoom extends Room<MyRoomState> {
       mousePosition: { x: 0, y: 0 },
       playerName: options.playerName,
       playerColor: options.playerColor,
+      powerUpActive: false,
     });
 
     this.opponentId = client.sessionId;
@@ -380,6 +396,9 @@ export class MyRoom extends Room<MyRoomState> {
   }
 
   resetBallPosition(isHost: boolean) {
+    this.broadcast("ball-changed-trail", "none");
+    this.broadcast("set-show-trail", false);
+
     this.playerLastTableHit = undefined;
     this.touchedLastBy = undefined;
     this.matchState = "serving";
