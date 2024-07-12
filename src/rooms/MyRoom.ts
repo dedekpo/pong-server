@@ -385,13 +385,13 @@ export class MyRoom extends Room<MyRoomState> {
 
       this.canScore = true;
 
-      // const winner = this.checkForWinner(); // todo - remove
+      const winner = this.checkForWinner();
 
-      // if (winner) {
-      //   this.matchState = "ended";
-      //   this.broadcast("winner", winner);
-      //   return;
-      // }
+      if (winner) {
+        this.matchState = "ended";
+        this.broadcast("winner", winner);
+        return;
+      }
     }, 1000);
   }
 
@@ -418,22 +418,17 @@ export class MyRoom extends Room<MyRoomState> {
 
   checkForWinner() {
     for (const player of this.playersMap.values()) {
-      if (player.score >= 5) return player.id;
+      if (player.score >= 7) return player.id;
     }
     return false;
   }
 
   onLeave(client: Client, consented: boolean) {
     console.log(client.sessionId, "left!");
-    // let winner; // TODO
-    // for (let [key, value] of this.playersMap.entries()) {
-    //   if (client.sessionId !== key) {
-    //     winner = key;
-    //   }
-    // }
-    // this.playersMap.delete(client.sessionId);
 
-    // this.terminateRoom(winner);
+    this.broadcast("player-left", client.sessionId);
+
+    this.disconnect();
   }
 
   onDispose() {
