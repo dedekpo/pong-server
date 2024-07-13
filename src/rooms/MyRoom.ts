@@ -281,6 +281,7 @@ export class MyRoom extends Room<MyRoomState> {
         this.matchState = "playing";
         const player = this.playersMap.get(this.hostId);
         racketHitBall(this, this.ballRigidBody, this.racketRigidBody, player);
+        this.broadcast("play-hit-racket");
         this.touchedLastBy = this.hostId;
       } else if (
         handle1 === this.ballRigidBody.handle &&
@@ -294,17 +295,20 @@ export class MyRoom extends Room<MyRoomState> {
           this.opponentRacketRigidBody,
           player
         );
+        this.broadcast("play-hit-racket");
         this.touchedLastBy = this.opponentId;
       } else if (
         handle1 === this.playerTableBody.handle &&
         handle2 === this.ballRigidBody.handle
       ) {
         ballHitPlayerTable(this);
+        this.broadcast("play-hit-table", true);
       } else if (
         handle1 === this.opponentTableBody.handle &&
         handle2 === this.ballRigidBody.handle
       ) {
         ballHitOpponentTable(this);
+        this.broadcast("play-hit-table", false);
       }
     });
   }
@@ -426,7 +430,9 @@ export class MyRoom extends Room<MyRoomState> {
   onLeave(client: Client, consented: boolean) {
     console.log(client.sessionId, "left!");
 
-    this.broadcast("player-left", client.sessionId);
+    if (this.matchState === "playing" || this.matchState === "serving") {
+      this.broadcast("player-left", client.sessionId);
+    }
 
     this.disconnect();
   }
